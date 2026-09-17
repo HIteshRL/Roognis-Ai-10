@@ -1,0 +1,19 @@
+# Dependencies (each service builds its own from package-lock.json / requirements.txt)
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv*/
+
+# Local dev SQLite (services/reporting defaults to sqlite:///./reporting.db when
+# no DATABASE_URL is set) and any other dev database file.
+*.db
+
+# OS / editor cruft
+.DS_Store
+*.crlf.bak
+
+# Local env files — never commit real secrets
+.env
+.env.local
+.env.production

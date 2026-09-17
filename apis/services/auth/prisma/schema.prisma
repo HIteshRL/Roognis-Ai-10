@@ -1,0 +1,58 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["auth_db"]
+}
+
+model School {
+  id    String @id @default(uuid()) @db.Uuid
+  name  String @db.VarChar(255)
+
+  users User[]
+
+  @@map("schools")
+  @@schema("auth_db")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(255)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         Role
+  schoolId     String   @map("school_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  school       School          @relation(fields: [schoolId], references: [id])
+  parentLinks  ParentStudent[] @relation("ParentLinks")
+  studentLinks ParentStudent[] @relation("StudentLinks")
+
+  @@index([schoolId, role])
+  @@map("users")
+  @@schema("auth_db")
+}
+
+model ParentStudent {
+  parentId  String @map("parent_id") @db.Uuid
+  studentId String @map("student_id") @db.Uuid
+
+  parent  User @relation("ParentLinks",  fields: [parentId],  references: [id])
+  student User @relation("StudentLinks", fields: [studentId], references: [id])
+
+  @@id([parentId, studentId])
+  @@map("parent_student")
+  @@schema("auth_db")
+}
+
+enum Role {
+  student
+  teacher
+  parent
+
+  @@schema("auth_db")
+}

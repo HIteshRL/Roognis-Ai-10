@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+acme.json
+postgres-data/
+chroma-data/
+neo4j-data/
+rag-storage/
+lms-storage/
+gnn-artifacts/

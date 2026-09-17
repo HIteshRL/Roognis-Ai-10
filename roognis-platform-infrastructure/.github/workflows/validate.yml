@@ -1,0 +1,30 @@
+name: Validate platform topology
+
+on:
+  pull_request:
+    paths:
+      - "platform.compose.yaml"
+      - "platform.build.compose.yaml"
+      - ".env.example"
+      - "traefik/**"
+      - "scripts/**"
+      - ".github/workflows/validate.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  compose-config:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production topology and integration overlay
+        run: ./scripts/validate-compose.sh
+      - name: Prove quarantined services are excluded from the deployment topology
+        run: |
+          if grep -Eq '^  (psv|school-ops|school-ops-worker|school-ops-migrate):' platform.compose.yaml platform.build.compose.yaml; then
+            echo 'PSV and School Ops must not be declared in this release topology.' >&2
+            exit 1
+          fi

@@ -1,0 +1,30 @@
+{
+  "name": "roognis-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Roognis parent-portal SPA — guardian view (progress summary, notifications, settings), extracted from roognis-product/web. \"name\"/\"version\"/dependencies are left untouched so package-lock.json stays valid for `npm ci`; pdfjs-dist is an unused leftover from the student PDF reader this extraction removed, kept for the same lockfile-safety reason.",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 4173",
+    "start": "node server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.3.289",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.9"
+  }
+}

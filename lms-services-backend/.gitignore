@@ -1,0 +1,9 @@
+.env
+.env.production
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# LMS local upload storage (docker volume mounts here when run outside Compose)
+storage/

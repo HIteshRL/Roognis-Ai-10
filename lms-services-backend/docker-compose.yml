@@ -1,0 +1,64 @@
+# Standalone Compose file for the LMS service, extracted from
+# roognis-product's monorepo docker-compose.yml. In the source stack, seven
+# other services sit behind a Traefik router (PathPrefix `/api/lms`) and
+# share one Postgres instance via schema-per-service. Here LMS gets its own
+# Postgres and is reachable directly on :3006 — there is no Traefik.
+#
+# AUTH_SERVICE_URL / ANALYTICS_URL / RAG_SERVICE_URL / QUIZ_SERVICE_URL below
+# point at placeholder hosts. Point them at wherever those services actually
+# run (or leave them unset — each dependency degrades gracefully, see
+# README.md "Dependencies") if you're running LMS in isolation.
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      POSTGRES_DB: roognis
+    volumes:
+      - lms_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  lms:
+    build: ./services/lms
+    environment:
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD:?Set DB_PASSWORD in .env}@postgres:5432/roognis
+      LMS_DB_SCHEMA: lms_db
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN in .env}
+      # Outbound dependencies — see README.md. Point these at real
+      # deployments, or leave blank to degrade the specific flows that need
+      # them (each is checked for emptiness in clients.py / curriculum.py).
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL:-}
+      ANALYTICS_URL: ${ANALYTICS_URL:-}
+      RAG_SERVICE_URL: ${RAG_SERVICE_URL:-}
+      QUIZ_SERVICE_URL: ${QUIZ_SERVICE_URL:-}
+      PORT: 3006
+      NODE_ENV: production
+      FILE_STORAGE_PATH: /app/storage
+    volumes:
+      - lms_file_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3006/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    ports:
+      - "3006:3006"
+    restart: unless-stopped
+
+volumes:
+  lms_postgres_data:
+  lms_file_storage:

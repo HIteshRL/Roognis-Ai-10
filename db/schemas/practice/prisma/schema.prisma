@@ -1,0 +1,142 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["practice_db"]
+}
+
+// Ungated by design — see CLAUDE.md "Generated visuals" / "Instant practice
+// content" sections. Never merge this into services/quiz's Quiz model or add
+// an approval field here: that gate's meaning (status:'ready' means a human
+// saw it) must stay intact for the teacher-facing quiz product. This is a
+// separate, honestly-ungated pipeline.
+model PracticeSet {
+  id                 String            @id @default(uuid()) @db.Uuid
+  studentId          String            @map("student_id") @db.Uuid
+  schoolId           String            @map("school_id") @db.Uuid
+  status             PracticeSetStatus @default(queued)
+  chapterKey         String            @map("chapter_key") @db.VarChar(80)
+  contentFingerprint String            @map("content_fingerprint") @db.VarChar(80)
+  summary            Json?
+  flashcards         Json?
+  quiz               Json?
+  provenance         Json?
+  // The RAG documents this set was grounded on. Persisted (rather than
+  // discarded as before) so a weak area derived from a practice attempt can
+  // name which documents it came from — that is what makes it card-eligible
+  // in services/discover without the card having to guess a chapter.
+  // TEXT[] rather than UUID[]: RAG owns these ids and a non-uuid one must
+  // degrade to an unusable value, not fail the insert.
+  documentIds        String[]          @map("document_ids")
+  // Stable hash of the concept-priority plan this set was generated for.
+  // Part of the cache key so a targeted set never collides with a generic
+  // one for the same chapter+fingerprint. Empty string = untargeted.
+  targetingFingerprint String          @default("") @map("targeting_fingerprint") @db.VarChar(80)
+  failureReason      String?           @map("failure_reason") @db.Text
+  model              String?           @db.VarChar(80)
+  provider           String?           @db.VarChar(24)
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+
+  attempts PracticeAttempt[]
+  reviewStates FlashcardReviewState[]
+
+  @@index([studentId, createdAt])
+  @@index([studentId, chapterKey, contentFingerprint], map: "practice_sets_cache_idx")
+  @@index([studentId, chapterKey, contentFingerprint, targetingFingerprint], map: "practice_sets_targeted_cache_idx")
+  @@map("practice_sets")
+  @@schema("practice_db")
+}
+
+enum PracticeSetStatus {
+  queued
+  processing
+  done
+  failed
+
+  @@schema("practice_db")
+}
+
+model PracticeAttempt {
+  id                   String    @id @default(uuid()) @db.Uuid
+  practiceSetId        String    @map("practice_set_id") @db.Uuid
+  studentId            String    @map("student_id") @db.Uuid
+  schoolId             String    @map("school_id") @db.Uuid
+  answers              Json      @default("{}")
+  result               Json      @default("{}")
+  flashcardsReviewedAt DateTime? @map("flashcards_reviewed_at")
+  completedAt          DateTime? @map("completed_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  practiceSet PracticeSet @relation(fields: [practiceSetId], references: [id])
+
+  @@index([studentId, createdAt])
+  @@index([practiceSetId, studentId])
+  @@map("practice_attempts")
+  @@schema("practice_db")
+}
+
+// Per-card spaced-repetition state, keyed independent of PracticeAttempt
+// (which only tracks whole-set completion via flashcardsReviewedAt). cardId
+// is only unique within a PracticeSet's flashcards JSON ("f1".."fN") —
+// regenerating a set makes old rows orphan naturally, which is fine: the due
+// query only surfaces cards that still resolve against a `done` set's JSON.
+// Deterministic scheduler only (services/practice/scheduler.js) — no LLM
+// in this path, per CLAUDE.md's "no LLM in scoring/routing/learner-state"
+// rule. easeFactor is stored as an integer x100 to avoid float drift across
+// repeated upserts.
+model FlashcardReviewState {
+  id             String    @id @default(uuid()) @db.Uuid
+  studentId      String    @map("student_id") @db.Uuid
+  schoolId       String    @map("school_id") @db.Uuid
+  practiceSetId  String    @map("practice_set_id") @db.Uuid
+  cardId         String    @map("card_id") @db.VarChar(16)
+  repetitions    Int       @default(0)
+  intervalDays   Int       @default(0) @map("interval_days")
+  easeFactor     Int       @default(250) @map("ease_factor")
+  lapses         Int       @default(0)
+  dueAt          DateTime  @map("due_at")
+  lastReviewedAt DateTime? @map("last_reviewed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  practiceSet PracticeSet @relation(fields: [practiceSetId], references: [id])
+
+  @@unique([studentId, practiceSetId, cardId], name: "studentPracticeCardIdentity", map: "flashcard_review_identity")
+  @@index([studentId, dueAt])
+  @@map("flashcard_review_states")
+  @@schema("practice_db")
+}
+model EvidenceOutbox {
+  id String @id @db.VarChar(64)
+  payload Json
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  deliveredAt DateTime? @map("delivered_at")
+  lastError String? @map("last_error") @db.VarChar(240)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([deliveredAt, nextAttemptAt])
+  @@map("evidence_outbox")
+  @@schema("practice_db")
+}
+
+
+model GenerationTask {
+  id String @id @db.Uuid
+  payload Json
+  status String @default("queued")
+  attempts Int @default(0)
+  availableAt DateTime @default(now()) @map("available_at")
+  leasedUntil DateTime? @map("leased_until")
+  leaseToken String? @map("lease_token")
+  lastError String? @map("last_error")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([status, availableAt])
+  @@map("generation_tasks")
+  @@schema("practice_db")
+}

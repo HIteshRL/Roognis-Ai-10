@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest==9.1.1
+# Starlette's TestClient is used by the isolated Neo4j contract test.
+httpx==0.28.1

@@ -1,0 +1,32 @@
+{
+  "name": "roognis-ai",
+  "version": "1.0.0",
+  "description": "Roognis AI — Tutor, media, and feedback service",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "pretest": "prisma generate --schema=prisma/schema.prisma",
+    "test": "node --test",
+    "db:push": "npx prisma db push --schema=prisma/schema.prisma",
+    "db:migrate": "npx prisma migrate deploy --schema=prisma/schema.prisma",
+    "db:generate": "npx prisma generate --schema=prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0",
+    "cookie-parser": "^1.4.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2",
+    "redis": "^4.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4",
+    "prisma": "^5.14.0"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

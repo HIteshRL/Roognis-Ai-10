@@ -1,0 +1,183 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["quiz_db"]
+}
+
+model ChapterQuizSource {
+  id                    String              @id @default(uuid()) @db.Uuid
+  schoolId              String              @map("school_id") @db.Uuid
+  board                 String              @db.VarChar(40)
+  curriculum            String              @db.VarChar(80)
+  grade                 Int
+  subject               String              @db.VarChar(80)
+  book                  String              @db.VarChar(180)
+  chapterNumber         Int                 @map("chapter_number")
+  chapterName           String              @map("chapter_name") @db.VarChar(220)
+  language              String              @db.VarChar(80)
+  edition               String              @db.VarChar(40)
+  documentIds           Json                @default("[]") @map("document_ids")
+  documentCount         Int                 @default(0) @map("document_count")
+  entityCount           Int                 @default(0) @map("entity_count")
+  chunkCount            Int                 @default(0) @map("chunk_count")
+  contentFingerprint    String              @map("content_fingerprint") @db.VarChar(80)
+  quizStatus            String              @default("missing") @map("quiz_status") @db.VarChar(40)
+  activeQuizId          String?             @map("active_quiz_id") @db.Uuid
+  lastGenerationError   String?             @map("last_generation_error") @db.Text
+  lastGeneratedAt       DateTime?           @map("last_generated_at")
+  createdAt             DateTime            @default(now()) @map("created_at")
+  updatedAt             DateTime            @updatedAt @map("updated_at")
+
+  quizzes        Quiz[]
+  generationJobs QuizGenerationJob[]
+  attempts       QuizAttempt[]
+
+  @@unique([schoolId, board, curriculum, grade, subject, book, chapterNumber, language, edition], name: "source_identity")
+  @@index([schoolId, subject, grade])
+  @@index([schoolId, quizStatus])
+  @@map("chapter_quiz_sources")
+  @@schema("quiz_db")
+}
+
+model Quiz {
+  id                 String             @id @default(uuid()) @db.Uuid
+  sourceId           String             @map("source_id") @db.Uuid
+  schoolId           String             @map("school_id") @db.Uuid
+  teacherId          String?            @map("teacher_id") @db.Uuid
+  title              String             @db.VarChar(240)
+  chapterSummary     String             @map("chapter_summary") @db.Text
+  // pending_review | ready | archived — see lib/quiz-status.js.
+  // Defaults to pending_review: questions are LLM-drafted and no automated
+  // check can establish that an answer key is correct, so a teacher approves
+  // before any student can open the quiz.
+  status             String             @default("pending_review") @db.VarChar(40)
+  approvedAt         DateTime?          @map("approved_at")
+  approvedBy         String?            @map("approved_by") @db.Uuid
+  questionCount      Int                @map("question_count")
+  simpleCount        Int                @map("simple_count")
+  mediumCount        Int                @map("medium_count")
+  hardCount          Int                @map("hard_count")
+  generationModel    String?            @map("generation_model") @db.VarChar(120)
+  contentFingerprint String             @map("content_fingerprint") @db.VarChar(80)
+  sourceCoverage     Json               @default("[]") @map("source_coverage")
+  curriculumLinks    Json               @default("[]") @map("curriculum_links")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  source    ChapterQuizSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  questions QuizQuestion[]
+  jobs      QuizGenerationJob[]
+  attempts  QuizAttempt[]
+
+  @@index([schoolId, status, createdAt])
+  @@index([sourceId, createdAt])
+  @@map("quizzes")
+  @@schema("quiz_db")
+}
+
+model QuizAttempt {
+  id          String   @id @default(uuid()) @db.Uuid
+  quizId      String   @map("quiz_id") @db.Uuid
+  sourceId    String   @map("source_id") @db.Uuid
+  schoolId    String   @map("school_id") @db.Uuid
+  studentId   String   @map("student_id") @db.Uuid
+  answers     Json     @default("{}")
+  result      Json     @default("{}")
+  score       Int      @default(0)
+  maxScore    Int      @map("max_score")
+  percentage  Float    @default(0)
+  submittedAt DateTime @default(now()) @map("submitted_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  source ChapterQuizSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  quiz   Quiz              @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, submittedAt])
+  @@index([quizId, studentId])
+  @@index([schoolId, submittedAt])
+  @@map("quiz_attempts")
+  @@schema("quiz_db")
+}
+
+model QuizQuestion {
+  id             String   @id @default(uuid()) @db.Uuid
+  quizId         String   @map("quiz_id") @db.Uuid
+  orderIndex     Int      @map("order_index")
+  type           String   @db.VarChar(40)
+  difficulty     String   @db.VarChar(20)
+  bloomLevel     String   @map("bloom_level") @db.VarChar(40)
+  conceptTag     String   @map("concept_tag") @db.VarChar(160)
+  conceptId      String   @map("concept_id") @db.VarChar(160)
+  misconceptionIds Json   @default("[]") @map("misconception_ids")
+  weakAreaLabel  String   @map("weak_area_label") @db.VarChar(160)
+  prompt         String   @db.Text
+  options        Json     @default("[]")
+  correctAnswer  String   @map("correct_answer") @db.Text
+  explanation    String   @db.Text
+  sourceChunkIds Json     @default("[]") @map("source_chunk_ids")
+  marks          Int      @default(1)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@index([quizId, orderIndex])
+  @@index([quizId, difficulty])
+  @@index([conceptId])
+  @@map("quiz_questions")
+  @@schema("quiz_db")
+}
+
+model QuizGenerationJob {
+  id          String   @id @default(uuid()) @db.Uuid
+  sourceId    String   @map("source_id") @db.Uuid
+  quizId      String?  @map("quiz_id") @db.Uuid
+  trigger     String   @default("manual") @db.VarChar(40)
+  status      String   @default("queued") @db.VarChar(40)
+  error       String?  @db.Text
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  completedAt DateTime? @map("completed_at")
+
+  source ChapterQuizSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  quiz   Quiz?             @relation(fields: [quizId], references: [id], onDelete: SetNull)
+
+  @@index([sourceId, createdAt])
+  @@index([status])
+  @@map("quiz_generation_jobs")
+  @@schema("quiz_db")
+}
+model EvidenceOutbox {
+  id String @id @db.VarChar(64)
+  payload Json
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  deliveredAt DateTime? @map("delivered_at")
+  lastError String? @map("last_error") @db.VarChar(240)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([deliveredAt, nextAttemptAt])
+  @@map("evidence_outbox")
+  @@schema("quiz_db")
+}
+
+
+model GenerationTask {
+  id String @id @db.Uuid
+  payload Json
+  status String @default("queued")
+  attempts Int @default(0)
+  availableAt DateTime @default(now()) @map("available_at")
+  leasedUntil DateTime? @map("leased_until")
+  leaseToken String? @map("lease_token")
+  lastError String? @map("last_error")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([status, availableAt])
+  @@map("generation_tasks")
+  @@schema("quiz_db")
+}

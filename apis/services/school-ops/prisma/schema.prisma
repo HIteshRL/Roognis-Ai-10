@@ -1,0 +1,381 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["school_ops"]
+}
+
+enum SchoolStatus {
+  PROVISIONED
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+
+  @@schema("school_ops")
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+
+  @@schema("school_ops")
+}
+
+enum RoleKey {
+  SCHOOL_ADMIN
+  TEACHER
+  STUDENT
+  GUARDIAN
+  READ_ONLY
+
+  @@schema("school_ops")
+}
+
+enum RelationshipStatus {
+  PROPOSED
+  ACTIVE
+  REVOKED
+  EXPIRED
+
+  @@schema("school_ops")
+}
+
+enum ImportStatus {
+  DRAFT
+  VALIDATED
+  COMMITTED
+  FAILED
+
+  @@schema("school_ops")
+}
+
+enum WorkflowStatus {
+  QUEUED
+  RUNNING
+  WAITING_APPROVAL
+  WAITING_EXTERNAL
+  COMPLETED
+  FAILED
+  CANCELLED
+
+  @@schema("school_ops")
+}
+
+enum WorkflowStepStatus {
+  PENDING
+  RUNNING
+  WAITING_APPROVAL
+  WAITING_EXTERNAL
+  COMPLETED
+  FAILED
+  SKIPPED
+
+  @@schema("school_ops")
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+
+  @@schema("school_ops")
+}
+
+enum DeliveryStatus {
+  PENDING
+  PROCESSING
+  DISPATCHED
+  FAILED
+
+  @@schema("school_ops")
+}
+
+enum IdempotencyStatus {
+  PROCESSING
+  COMPLETED
+
+  @@schema("school_ops")
+}
+
+model School {
+  id          String       @id @default(uuid()) @db.Uuid
+  slug        String       @unique @db.VarChar(80)
+  displayName String       @map("display_name") @db.VarChar(255)
+  legalName   String?      @map("legal_name") @db.VarChar(255)
+  timezone    String       @default("Asia/Kolkata") @db.VarChar(64)
+  status      SchoolStatus @default(PROVISIONED)
+  policy      Json         @default("{}")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  memberships           SchoolMembership[]
+  students              StudentProfile[]
+  guardianRelationships GuardianRelationship[]
+  rosterImports         RosterImportJob[]
+  workflowRuns          WorkflowRun[]
+  approvalTasks         ApprovalTask[]
+  outboxEvents          OutboxEvent[]
+  auditEvents           AuditEvent[]
+
+  @@map("schools")
+  @@schema("school_ops")
+}
+
+model SchoolMembership {
+  id           String           @id @default(uuid()) @db.Uuid
+  schoolId     String           @map("school_id") @db.Uuid
+  principalId  String           @map("principal_id") @db.Uuid
+  status       MembershipStatus @default(INVITED)
+  authzVersion Int              @default(1) @map("authz_version")
+  source       String           @default("school_ops") @db.VarChar(80)
+  effectiveAt  DateTime         @default(now()) @map("effective_at")
+  endedAt      DateTime?        @map("ended_at")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  school          School          @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  roles           RoleGrant[]
+  studentProfile  StudentProfile?
+  guardianLinks   GuardianRelationship[] @relation("GuardianMembership")
+
+  @@unique([schoolId, principalId])
+  @@index([principalId, status])
+  @@index([schoolId, status])
+  @@map("school_memberships")
+  @@schema("school_ops")
+}
+
+model RoleGrant {
+  id           String   @id @default(uuid()) @db.Uuid
+  membershipId String   @map("membership_id") @db.Uuid
+  role         RoleKey
+  scopeType    String   @default("school") @map("scope_type") @db.VarChar(64)
+  scopeId      String?  @map("scope_id") @db.VarChar(128)
+  grantedBy    String?  @map("granted_by") @db.Uuid
+  revokedAt    DateTime? @map("revoked_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  membership SchoolMembership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+
+  @@unique([membershipId, role, scopeType, scopeId])
+  @@index([membershipId, role, revokedAt])
+  @@map("role_grants")
+  @@schema("school_ops")
+}
+
+model StudentProfile {
+  id              String   @id @default(uuid()) @db.Uuid
+  schoolId        String   @map("school_id") @db.Uuid
+  membershipId    String   @unique @map("membership_id") @db.Uuid
+  admissionNumber String   @map("admission_number") @db.VarChar(120)
+  displayName     String   @map("display_name") @db.VarChar(255)
+  grade           String?  @db.VarChar(64)
+  section         String?  @db.VarChar(64)
+  sourceSystem    String?  @map("source_system") @db.VarChar(80)
+  sourceId        String?  @map("source_id") @db.VarChar(160)
+  lifecycleStatus String   @default("active") @map("lifecycle_status") @db.VarChar(40)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  school                School                 @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  membership            SchoolMembership       @relation(fields: [membershipId], references: [id], onDelete: Restrict)
+  guardianRelationships GuardianRelationship[]
+
+  @@unique([schoolId, admissionNumber])
+  @@unique([schoolId, sourceSystem, sourceId])
+  @@index([schoolId, lifecycleStatus])
+  @@map("student_profiles")
+  @@schema("school_ops")
+}
+
+model GuardianRelationship {
+  id                   String             @id @default(uuid()) @db.Uuid
+  schoolId             String             @map("school_id") @db.Uuid
+  guardianMembershipId String             @map("guardian_membership_id") @db.Uuid
+  studentProfileId     String             @map("student_profile_id") @db.Uuid
+  relationshipType     String             @default("guardian") @map("relationship_type") @db.VarChar(80)
+  status               RelationshipStatus @default(PROPOSED)
+  disclosurePolicy     Json               @default("{}") @map("disclosure_policy")
+  acceptedAt           DateTime?          @map("accepted_at")
+  revokedAt            DateTime?          @map("revoked_at")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+
+  school             School           @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  guardianMembership SchoolMembership @relation("GuardianMembership", fields: [guardianMembershipId], references: [id], onDelete: Restrict)
+  studentProfile     StudentProfile   @relation(fields: [studentProfileId], references: [id], onDelete: Restrict)
+
+  @@unique([guardianMembershipId, studentProfileId])
+  @@index([schoolId, status])
+  @@map("guardian_relationships")
+  @@schema("school_ops")
+}
+
+model RosterImportJob {
+  id          String       @id @default(uuid()) @db.Uuid
+  schoolId    String       @map("school_id") @db.Uuid
+  source      String       @default("csv") @db.VarChar(80)
+  fileDigest  String?      @map("file_digest") @db.VarChar(128)
+  payload     Json
+  validation  Json         @default("{}")
+  status      ImportStatus @default(DRAFT)
+  createdBy   String       @map("created_by") @db.Uuid
+  committedAt DateTime?    @map("committed_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+
+  @@index([schoolId, status])
+  @@map("roster_import_jobs")
+  @@schema("school_ops")
+}
+
+model WorkflowRun {
+  id              String         @id @default(uuid()) @db.Uuid
+  schoolId        String         @map("school_id") @db.Uuid
+  templateKey     String         @map("template_key") @db.VarChar(120)
+  templateVersion Int            @default(1) @map("template_version")
+  status          WorkflowStatus @default(QUEUED)
+  input           Json           @default("{}")
+  correlationId   String         @map("correlation_id") @db.Uuid
+  causationId     String?        @map("causation_id") @db.Uuid
+  idempotencyKey  String         @map("idempotency_key") @db.VarChar(255)
+  createdBy       String?        @map("created_by") @db.Uuid
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  school        School            @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  steps         WorkflowStepRun[]
+  approvalTasks ApprovalTask[]
+
+  @@unique([schoolId, idempotencyKey])
+  @@index([schoolId, status, createdAt])
+  @@map("workflow_runs")
+  @@schema("school_ops")
+}
+
+model WorkflowStepRun {
+  id          String             @id @default(uuid()) @db.Uuid
+  workflowRunId String           @map("workflow_run_id") @db.Uuid
+  position    Int
+  stepKey     String             @map("step_key") @db.VarChar(120)
+  status      WorkflowStepStatus @default(PENDING)
+  input       Json               @default("{}")
+  output      Json               @default("{}")
+  attempts    Int                @default(0)
+  leaseUntil  DateTime?          @map("lease_until")
+  lastError   String?            @map("last_error") @db.Text
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  workflowRun  WorkflowRun   @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  approvalTask ApprovalTask?
+
+  @@unique([workflowRunId, position])
+  @@index([status, leaseUntil])
+  @@map("workflow_step_runs")
+  @@schema("school_ops")
+}
+
+model ApprovalTask {
+  id                String         @id @default(uuid()) @db.Uuid
+  schoolId          String         @map("school_id") @db.Uuid
+  workflowRunId     String         @map("workflow_run_id") @db.Uuid
+  workflowStepRunId String?        @unique @map("workflow_step_run_id") @db.Uuid
+  action            String         @db.VarChar(120)
+  riskClass         String         @map("risk_class") @db.VarChar(40)
+  status            ApprovalStatus @default(PENDING)
+  requestedBy       String?        @map("requested_by") @db.Uuid
+  decidedBy         String?        @map("decided_by") @db.Uuid
+  decisionReason    String?        @map("decision_reason") @db.Text
+  decidedAt         DateTime?      @map("decided_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+
+  school          School           @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+  workflowRun     WorkflowRun      @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  workflowStepRun WorkflowStepRun? @relation(fields: [workflowStepRunId], references: [id], onDelete: SetNull)
+
+  @@index([schoolId, status, createdAt])
+  @@map("approval_tasks")
+  @@schema("school_ops")
+}
+
+model OutboxEvent {
+  id            String         @id @default(uuid()) @db.Uuid
+  schoolId      String         @map("school_id") @db.Uuid
+  eventType     String         @map("event_type") @db.VarChar(160)
+  schemaVersion Int            @default(1) @map("schema_version")
+  subjectType   String         @map("subject_type") @db.VarChar(80)
+  subjectId     String         @map("subject_id") @db.VarChar(128)
+  correlationId String         @map("correlation_id") @db.Uuid
+  causationId   String?        @map("causation_id") @db.Uuid
+  payload       Json
+  status        DeliveryStatus @default(PENDING)
+  attempts      Int            @default(0)
+  leaseUntil    DateTime?      @map("lease_until")
+  lastError     String?        @map("last_error") @db.Text
+  dispatchedAt  DateTime?      @map("dispatched_at")
+  createdAt     DateTime       @default(now()) @map("created_at")
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+
+  @@index([status, leaseUntil, createdAt])
+  @@map("outbox_events")
+  @@schema("school_ops")
+}
+
+model CommandReceipt {
+  id          String   @id @default(uuid()) @db.Uuid
+  service     String   @db.VarChar(80)
+  commandId   String   @map("command_id") @db.Uuid
+  status      String   @db.VarChar(40)
+  response    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([service, commandId])
+  @@map("command_receipts")
+  @@schema("school_ops")
+}
+
+model IdempotencyRecord {
+  id           String            @id @default(uuid()) @db.Uuid
+  scope        String            @db.VarChar(255)
+  key          String            @db.VarChar(255)
+  requestHash  String            @map("request_hash") @db.VarChar(128)
+  status       IdempotencyStatus @default(PROCESSING)
+  responseCode Int?              @map("response_code")
+  responseBody Json?             @map("response_body")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  @@unique([scope, key])
+  @@map("idempotency_records")
+  @@schema("school_ops")
+}
+
+model AuditEvent {
+  id            String   @id @default(uuid()) @db.Uuid
+  schoolId      String   @map("school_id") @db.Uuid
+  actorId       String?  @map("actor_id") @db.Uuid
+  action        String   @db.VarChar(160)
+  targetType    String   @map("target_type") @db.VarChar(80)
+  targetId      String   @map("target_id") @db.VarChar(128)
+  outcome       String   @db.VarChar(40)
+  correlationId String   @map("correlation_id") @db.Uuid
+  metadata      Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  school School @relation(fields: [schoolId], references: [id], onDelete: Restrict)
+
+  @@index([schoolId, createdAt])
+  @@map("audit_events")
+  @@schema("school_ops")
+}

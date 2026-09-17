@@ -1,0 +1,661 @@
+# Roognis multi-repository production deployment baseline.
+#
+# This file deliberately references immutable images. It does not silently
+# build a deployment from whichever local checkout happens to be present.
+# See README.md for release gates and the separate integration-build overlay.
+name: roognis-platform
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  init: true
+  networks:
+    - edge
+    - private
+  deploy:
+    resources:
+      limits:
+        cpus: "1.00"
+        memory: 1024M
+      reservations:
+        cpus: "0.10"
+        memory: 128M
+
+x-api-healthcheck: &api-healthcheck
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+services:
+  gateway:
+    image: ${TRAEFIK_IMAGE:?Set TRAEFIK_IMAGE to a pinned digest}
+    restart: unless-stopped
+    command:
+      - --api.dashboard=false
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.filename=/etc/traefik/dynamic.yaml
+      - --ping=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL:?Set ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --accesslog=true
+      - --log.level=INFO
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+      - traefik-acme:/acme
+    networks:
+      - edge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.http.middlewares.platform-security.chain.middlewares=secure-headers@file
+
+  postgres:
+    image: ${POSTGRES_IMAGE:?Set POSTGRES_IMAGE to a pinned digest}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: roognis
+      POSTGRES_USER: roognis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --auth=scram-sha-256
+    command: ["postgres", "-c", "max_connections=150", "-c", "shared_buffers=256MB", "-c", "log_min_duration_statement=1000"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - private
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roognis -d roognis"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 2048M }
+        reservations: { cpus: "0.25", memory: 512M }
+
+  redis:
+    image: ${REDIS_IMAGE:?Set REDIS_IMAGE to a pinned digest}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - private
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: ${CHROMADB_IMAGE:?Set CHROMADB_IMAGE to a pinned digest}
+    restart: unless-stopped
+    volumes:
+      - chroma-data:/chroma/chroma
+    networks:
+      - private
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/v2/heartbeat >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 2048M }
+        reservations: { cpus: "0.25", memory: 512M }
+
+  neo4j:
+    image: ${NEO4J_IMAGE:?Set NEO4J_IMAGE to a pinned digest}
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1024m
+    volumes:
+      - neo4j-data:/data
+    networks:
+      - private
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    deploy:
+      resources:
+        limits: { cpus: "2.00", memory: 2048M }
+        reservations: { cpus: "0.25", memory: 768M }
+
+  auth-migrate:
+    image: ${AUTH_IMAGE:?Set AUTH_IMAGE to a pinned digest}
+    command: ["npm", "run", "db:migrate"]
+    environment: &node-db-env
+      DATABASE_URL: postgresql://roognis:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/roognis
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [private]
+    restart: "no"
+
+  ai-migrate:
+    image: ${AI_IMAGE:?Set AI_IMAGE to a pinned digest}
+    command: ["npm", "run", "db:migrate"]
+    environment: *node-db-env
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [private]
+    restart: "no"
+
+  analytics-migrate:
+    image: ${ANALYTICS_IMAGE:?Set ANALYTICS_IMAGE to a pinned digest}
+    command: ["npm", "run", "db:migrate"]
+    environment: *node-db-env
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [private]
+    restart: "no"
+
+  quiz-migrate:
+    image: ${QUIZ_IMAGE:?Set QUIZ_IMAGE to a pinned digest}
+    command: ["npm", "run", "db:migrate"]
+    environment: *node-db-env
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [private]
+    restart: "no"
+
+  practice-migrate:
+    image: ${PRACTICE_IMAGE:?Set PRACTICE_IMAGE to a pinned digest}
+    command: ["npm", "run", "db:migrate"]
+    environment: *node-db-env
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [private]
+    restart: "no"
+
+  discover-migrate:
+    image: ${DISCOVER_IMAGE:?Set DISCOVER_IMAGE to a pinned digest}
+    command: ["npm", "run", "db:migrate"]
+    environment: *node-db-env
+    depends_on: { postgres: { condition: service_healthy } }
+    networks: [private]
+    restart: "no"
+
+  auth:
+    <<: *service-defaults
+    image: ${AUTH_IMAGE:?Set AUTH_IMAGE to a pinned digest}
+    environment:
+      <<: *node-db-env
+      NODE_ENV: production
+      PORT: 3001
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      COOKIE_SECURE: "true"
+      ALLOW_SELF_REGISTRATION: "false"
+      SEED_DEMO_USERS: "false"
+      BOOTSTRAP_ENABLED: "false"
+    depends_on: { auth-migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3001/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.auth.rule=PathPrefix(`/api/auth`)
+      - traefik.http.routers.auth.entrypoints=websecure
+      - traefik.http.routers.auth.tls.certresolver=le
+      - traefik.http.routers.auth.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.auth.loadbalancer.server.port=3001
+
+  ai:
+    <<: *service-defaults
+    image: ${AI_IMAGE:?Set AI_IMAGE to a pinned digest}
+    environment:
+      <<: *node-db-env
+      NODE_ENV: production
+      PORT: 3002
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      REDIS_URL: redis://redis:6379
+      LLM_PROVIDER: local
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:?Set LOCAL_LLM_BASE_URL}
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:?Set LOCAL_LLM_API_KEY}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:?Set LOCAL_LLM_MODEL}
+      LOCAL_LLM_JSON_SCHEMA: "true"
+      AUTH_SERVICE_URL: http://auth:3001
+      ANALYTICS_URL: http://analytics:3004
+      DISCOVER_SERVICE_URL: http://discover:3008
+      LMS_SERVICE_URL: http://lms:3006
+      RAG_SERVICE_URL: http://rag:3003
+      QUIZ_SERVICE_URL: http://quiz:3005
+      PRACTICE_SERVICE_URL: http://practice:3007
+      PSV_SERVICE_URL: ""
+      NEWS_REFRESH_ENABLED: "false"
+      STUDY_VISUAL_ENABLED: "false"
+      FILE_STORAGE_PATH: /app/storage
+    volumes: [rag-storage:/app/storage]
+    depends_on:
+      ai-migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3002/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.ai.rule=PathPrefix(`/api/ai`)
+      - traefik.http.routers.ai.entrypoints=websecure
+      - traefik.http.routers.ai.tls.certresolver=le
+      - traefik.http.routers.ai.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.ai.loadbalancer.server.port=3002
+
+  analytics:
+    <<: *service-defaults
+    image: ${ANALYTICS_IMAGE:?Set ANALYTICS_IMAGE to a pinned digest}
+    environment:
+      <<: *node-db-env
+      NODE_ENV: production
+      PORT: 3004
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      AUTH_SERVICE_URL: http://auth:3001
+      QUIZ_SERVICE_URL: http://quiz:3005
+    depends_on: { analytics-migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3004/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.analytics.rule=PathPrefix(`/api/analytics`)
+      - traefik.http.routers.analytics.entrypoints=websecure
+      - traefik.http.routers.analytics.tls.certresolver=le
+      - traefik.http.routers.analytics.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.analytics.loadbalancer.server.port=3004
+
+  quiz:
+    <<: *service-defaults
+    image: ${QUIZ_IMAGE:?Set QUIZ_IMAGE to a pinned digest}
+    environment:
+      <<: *node-db-env
+      NODE_ENV: production
+      PORT: 3005
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      AI_SERVICE_URL: http://ai:3002
+      ANALYTICS_URL: http://analytics:3004
+      DISCOVER_SERVICE_URL: http://discover:3008
+      KG_SERVICE_URL: http://kg:3012
+      LMS_SERVICE_URL: http://lms:3006
+      RAG_SERVICE_URL: http://rag:3003
+      PSV_SERVICE_URL: ""
+      GENERATION_WORKER: "true"
+      GENERATION_CONCURRENCY: "2"
+    depends_on: { quiz-migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3005/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.quiz.rule=PathPrefix(`/api/quiz`)
+      - traefik.http.routers.quiz.entrypoints=websecure
+      - traefik.http.routers.quiz.tls.certresolver=le
+      - traefik.http.routers.quiz.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.quiz.loadbalancer.server.port=3005
+
+  practice:
+    <<: *service-defaults
+    image: ${PRACTICE_IMAGE:?Set PRACTICE_IMAGE to a pinned digest}
+    environment:
+      <<: *node-db-env
+      NODE_ENV: production
+      PORT: 3007
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      LLM_PROVIDER: local
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:?Set LOCAL_LLM_BASE_URL}
+      LOCAL_LLM_API_KEY: ${LOCAL_LLM_API_KEY:?Set LOCAL_LLM_API_KEY}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:?Set LOCAL_LLM_MODEL}
+      LOCAL_LLM_JSON_SCHEMA: "true"
+      ANALYTICS_URL: http://analytics:3004
+      DISCOVER_SERVICE_URL: http://discover:3008
+      LMS_SERVICE_URL: http://lms:3006
+      QUIZ_SERVICE_URL: http://quiz:3005
+      RAG_SERVICE_URL: http://rag:3003
+      PSV_SERVICE_URL: ""
+      GENERATION_WORKER: "true"
+      GENERATION_CONCURRENCY: "2"
+    depends_on: { practice-migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3007/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.practice.rule=PathPrefix(`/api/practice`)
+      - traefik.http.routers.practice.entrypoints=websecure
+      - traefik.http.routers.practice.tls.certresolver=le
+      - traefik.http.routers.practice.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.practice.loadbalancer.server.port=3007
+
+  discover:
+    <<: *service-defaults
+    image: ${DISCOVER_IMAGE:?Set DISCOVER_IMAGE to a pinned digest}
+    environment:
+      <<: *node-db-env
+      NODE_ENV: production
+      PORT: 3008
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      AI_SERVICE_URL: http://ai:3002
+      ANALYTICS_URL: http://analytics:3004
+      PRACTICE_SERVICE_URL: http://practice:3007
+      QUIZ_SERVICE_URL: http://quiz:3005
+      RAG_SERVICE_URL: http://rag:3003
+      DECISION_SERVICE_URL: http://decisions:3014
+      PREFERENCE_GNN_URL: http://preference-gnn:3013
+      PREFERENCE_GNN_TRAINER_URL: http://preference-gnn-trainer:3016
+      DISCOVER_HUNT_ENABLED: "false"
+      DISCOVER_RSS_ENABLED: "false"
+      DISCOVER_VIDEO_HUNT_ENABLED: "false"
+      PREFERENCE_REFRESH_ENABLED: "false"
+    depends_on: { discover-migrate: { condition: service_completed_successfully } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3008/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.discover.rule=PathPrefix(`/api/discover`)
+      - traefik.http.routers.discover.entrypoints=websecure
+      - traefik.http.routers.discover.tls.certresolver=le
+      - traefik.http.routers.discover.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.discover.loadbalancer.server.port=3008
+
+  reporting:
+    <<: *service-defaults
+    image: ${REPORTING_IMAGE:?Set REPORTING_IMAGE to a pinned digest}
+    environment:
+      DATABASE_URL: postgresql://roognis:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/roognis
+      REPORTING_DB_SCHEMA: reporting_db
+      PORT: 3017
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      AUTH_SERVICE_URL: http://auth:3001
+      ANALYTICS_SERVICE_URL: http://analytics:3004
+      LMS_SERVICE_URL: http://lms:3006
+      # PSV is deliberately not deployed. Reporting remains operationally
+      # degraded, with the limitation surfaced in the response contract.
+      PSV_ENABLED: "false"
+      PSV_SERVICE_URL: ""
+    depends_on: { postgres: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3017/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.reporting.rule=PathPrefix(`/api/reporting`)
+      - traefik.http.routers.reporting.entrypoints=websecure
+      - traefik.http.routers.reporting.tls.certresolver=le
+      - traefik.http.routers.reporting.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.reporting.loadbalancer.server.port=3017
+
+  rag:
+    <<: *service-defaults
+    image: ${RAG_IMAGE:?Set RAG_IMAGE to a pinned digest}
+    environment: &python-data-env
+      DATABASE_URL: postgresql://roognis:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/roognis
+      RAG_DB_SCHEMA: rag_db
+      PORT: 3003
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      CHROMA_URL: http://chromadb:8000
+      OLLAMA_URL: ${EMBEDDING_PROVIDER_URL:?Set EMBEDDING_PROVIDER_URL}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:?Set OLLAMA_EMBEDDING_MODEL}
+      FILE_STORAGE_PATH: /app/storage
+      QUIZ_SERVICE_URL: http://quiz:3005
+      KG_SERVICE_URL: http://kg:3012
+      LMS_SERVICE_URL: http://lms:3006
+    volumes: [rag-storage:/app/storage]
+    depends_on:
+      postgres: { condition: service_healthy }
+      chromadb: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3003/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.rag.rule=PathPrefix(`/api/rag`)
+      - traefik.http.routers.rag.entrypoints=websecure
+      - traefik.http.routers.rag.tls.certresolver=le
+      - traefik.http.routers.rag.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.rag.loadbalancer.server.port=3003
+
+  rag-worker:
+    <<: *service-defaults
+    image: ${RAG_IMAGE:?Set RAG_IMAGE to a pinned digest}
+    command: ["python", "worker.py"]
+    environment: *python-data-env
+    volumes: [rag-storage:/app/storage]
+    depends_on:
+      postgres: { condition: service_healthy }
+      chromadb: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import os; raise SystemExit(0)'" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  lms:
+    <<: *service-defaults
+    image: ${LMS_IMAGE:?Set LMS_IMAGE to a pinned digest}
+    environment:
+      DATABASE_URL: postgresql://roognis:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/roognis
+      LMS_DB_SCHEMA: lms_db
+      PORT: 3006
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      AUTH_SERVICE_URL: http://auth:3001
+      ANALYTICS_URL: http://analytics:3004
+      RAG_SERVICE_URL: http://rag:3003
+      QUIZ_SERVICE_URL: http://quiz:3005
+      FILE_STORAGE_PATH: /app/storage
+    volumes: [lms-storage:/app/storage]
+    depends_on: { postgres: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:3006/health >/dev/null"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.lms.rule=PathPrefix(`/api/lms`)
+      - traefik.http.routers.lms.entrypoints=websecure
+      - traefik.http.routers.lms.tls.certresolver=le
+      - traefik.http.routers.lms.middlewares=platform-security@docker,api-rate-limit@file
+      - traefik.http.services.lms.loadbalancer.server.port=3006
+
+  kg:
+    <<: *service-defaults
+    image: ${KG_IMAGE:?Set KG_IMAGE to a pinned digest}
+    environment:
+      PORT: 3012
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD}
+      NEO4J_DATABASE: neo4j
+      KG_TEST_MODE: "false"
+    depends_on: { neo4j: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3012/health\")'" ]
+      <<: *api-healthcheck
+
+  knowledge-gnn:
+    <<: *service-defaults
+    image: ${GNN_IMAGE:?Set GNN_IMAGE to a pinned digest}
+    environment: &knowledge-gnn-env
+      PORT: 3013
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      GNN_LANE: knowledge
+      GNN_SHADOW_MODE: "true"
+      GNN_MODEL_ARTIFACT: /app/artifacts/knowledge.json
+    volumes: [gnn-artifacts:/app/artifacts]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3013/health\")'" ]
+      <<: *api-healthcheck
+
+  preference-gnn:
+    <<: *service-defaults
+    image: ${GNN_IMAGE:?Set GNN_IMAGE to a pinned digest}
+    environment:
+      <<: *knowledge-gnn-env
+      GNN_LANE: preference
+    volumes: [gnn-artifacts:/app/artifacts]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3013/health\")'" ]
+      <<: *api-healthcheck
+
+  preference-gnn-trainer:
+    <<: *service-defaults
+    image: ${GNN_IMAGE:?Set GNN_IMAGE to a pinned digest}
+    command: ["uvicorn", "trainer_main:app", "--host", "0.0.0.0", "--port", "3016"]
+    environment:
+      <<: *knowledge-gnn-env
+      PORT: 3016
+      GNN_LANE: preference
+    volumes: [gnn-artifacts:/app/artifacts]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3016/health\")'" ]
+      <<: *api-healthcheck
+
+  decisions:
+    <<: *service-defaults
+    image: ${DECISIONS_IMAGE:?Set DECISIONS_IMAGE to a pinned digest}
+    environment:
+      PORT: 3014
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      GNN_MIN_CONFIDENCE: "0.55"
+      GNN_MAX_BLEND_WEIGHT: "0.60"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3014/health\")'" ]
+      <<: *api-healthcheck
+
+  privacy:
+    <<: *service-defaults
+    image: ${PRIVACY_IMAGE:?Set PRIVACY_IMAGE to a pinned digest}
+    environment:
+      PORT: 3015
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?Set INTERNAL_SERVICE_TOKEN}
+      LMS_SERVICE_URL: http://lms:3006
+      # PSV is intentionally absent from this release topology.
+      PSV_SERVICE_URL: ""
+      PRIVACY_MIN_COHORT_SIZE: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:3015/health\")'" ]
+      <<: *api-healthcheck
+
+  parent-portal:
+    <<: *service-defaults
+    image: ${PARENT_PORTAL_IMAGE:?Set PARENT_PORTAL_IMAGE to a pinned digest}
+    networks: [edge]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ >/dev/null 2>&1"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.parent-portal.rule=Host(`parent.${ROOGNIS_BASE_DOMAIN:?Set ROOGNIS_BASE_DOMAIN}`)
+      - traefik.http.routers.parent-portal.entrypoints=websecure
+      - traefik.http.routers.parent-portal.tls.certresolver=le
+      - traefik.http.routers.parent-portal.middlewares=platform-security@docker
+      - traefik.http.services.parent-portal.loadbalancer.server.port=3000
+
+  student-portal:
+    <<: *service-defaults
+    image: ${STUDENT_PORTAL_IMAGE:?Set STUDENT_PORTAL_IMAGE to a pinned digest}
+    networks: [edge]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ >/dev/null 2>&1"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.student-portal.rule=Host(`student.${ROOGNIS_BASE_DOMAIN:?Set ROOGNIS_BASE_DOMAIN}`)
+      - traefik.http.routers.student-portal.entrypoints=websecure
+      - traefik.http.routers.student-portal.tls.certresolver=le
+      - traefik.http.routers.student-portal.middlewares=platform-security@docker
+      - traefik.http.services.student-portal.loadbalancer.server.port=3000
+
+  teacher-portal:
+    <<: *service-defaults
+    image: ${TEACHER_PORTAL_IMAGE:?Set TEACHER_PORTAL_IMAGE to a pinned digest}
+    networks: [edge]
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ >/dev/null 2>&1"]
+      <<: *api-healthcheck
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=roognis-edge
+      - traefik.http.routers.teacher-portal.rule=Host(`teacher.${ROOGNIS_BASE_DOMAIN:?Set ROOGNIS_BASE_DOMAIN}`)
+      - traefik.http.routers.teacher-portal.entrypoints=websecure
+      - traefik.http.routers.teacher-portal.tls.certresolver=le
+      - traefik.http.routers.teacher-portal.middlewares=platform-security@docker
+      - traefik.http.services.teacher-portal.loadbalancer.server.port=3000
+
+networks:
+  edge:
+    name: roognis-edge
+  private:
+    name: roognis-private
+    internal: true
+
+volumes:
+  traefik-acme:
+  postgres-data:
+  redis-data:
+  chroma-data:
+  neo4j-data:
+  rag-storage:
+  lms-storage:
+  gnn-artifacts:

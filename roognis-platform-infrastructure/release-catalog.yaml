@@ -1,0 +1,44 @@
+# Release manager input. Every field must be replaced during a release with a
+# repository commit and a corresponding signed, immutable image digest. This
+# file intentionally starts unapproved rather than pretending current local
+# source paths establish deployment provenance.
+release:
+  status: blocked
+  reason: >-
+    Populate every commit and image digest only after service CI, cross-service
+    contract tests, migration review, and the production gates in README.md pass.
+services:
+  auth: { repository: ../apis, commit: REQUIRED, image: AUTH_IMAGE }
+  ai: { repository: ../apis, commit: REQUIRED, image: AI_IMAGE }
+  analytics: { repository: ../apis, commit: REQUIRED, image: ANALYTICS_IMAGE }
+  quiz: { repository: ../apis, commit: REQUIRED, image: QUIZ_IMAGE }
+  practice: { repository: ../apis, commit: REQUIRED, image: PRACTICE_IMAGE }
+  discover: { repository: ../apis, commit: REQUIRED, image: DISCOVER_IMAGE }
+  reporting: { repository: ../apis, commit: REQUIRED, image: REPORTING_IMAGE }
+  rag: { repository: ../data-processing-backend, commit: REQUIRED, image: RAG_IMAGE }
+  lms: { repository: ../lms-services-backend, commit: REQUIRED, image: LMS_IMAGE }
+  kg: { repository: ../intelligence-decisioning, commit: REQUIRED, image: KG_IMAGE }
+  gnn: { repository: ../intelligence-decisioning, commit: REQUIRED, image: GNN_IMAGE }
+  decisions: { repository: ../intelligence-decisioning, commit: REQUIRED, image: DECISIONS_IMAGE }
+  privacy: { repository: ../intelligence-decisioning, commit: REQUIRED, image: PRIVACY_IMAGE }
+  parent-portal: { repository: ../parent-portal, commit: REQUIRED, image: PARENT_PORTAL_IMAGE }
+  student-portal: { repository: ../student-portal, commit: REQUIRED, image: STUDENT_PORTAL_IMAGE }
+  teacher-portal: { repository: ../teacher-portal, commit: REQUIRED, image: TEACHER_PORTAL_IMAGE }
+platform-dependencies:
+  traefik: { image: TRAEFIK_IMAGE }
+  postgres: { image: POSTGRES_IMAGE }
+  redis: { image: REDIS_IMAGE }
+  chromadb: { image: CHROMADB_IMAGE }
+  neo4j: { image: NEO4J_IMAGE }
+excluded:
+  school-ops:
+    repository: ../apis
+    decision: NOT_DEPLOYED
+    reason: >-
+      Auth and School Ops own independent School records. Do not deploy either
+      server, worker, or migration until the versioned Auth-school and
+      SchoolOps-membership bootstrap saga is implemented and qualified.
+  psv:
+    repository: ../intelligence-decisioning
+    decision: NOT_DEPLOYED
+    reason: Product approval is absent; it can drive student and guardian campaigns.

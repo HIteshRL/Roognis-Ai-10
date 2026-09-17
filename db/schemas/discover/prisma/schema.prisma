@@ -1,0 +1,542 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["discover_db"]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Open vocabulary.
+//
+// The predecessor (services/ai/interest-graph.js) held 41 hand-curated topics
+// in a frozen array, so "rock climbing", "drones" and "3d printing" — the long
+// tail a student actually cares about — were structurally unrepresentable. A
+// row here can be created at runtime, but `key` is always produced by
+// deterministic code (canonicalKey(): slugify + alias table), never by a model.
+// A model may propose a *label*; only interest/vocab.js decides the key.
+// ─────────────────────────────────────────────────────────────────────────────
+model InterestTopic {
+  key       String   @id @db.VarChar(90)
+  label     String   @db.VarChar(120)
+  cluster   String   @db.VarChar(40)
+  terms     Json     @default("[]")
+  status    String   @default("active") @db.VarChar(20) // active | blocked
+  seeded    Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("interest_topics")
+  @@schema("discover_db")
+}
+
+/// Per-student interest node. Same weight semantics as the ai_db predecessor
+/// (lazy exponential decay applied at read and write, never a sweep job),
+/// plus `origin` so the UI can distinguish an interest the student explicitly
+/// confirmed from one inferred behaviourally.
+model InterestNode {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  kind      String   @db.VarChar(16) // genre | topic | entity
+  key       String   @db.VarChar(90)
+  weight    Float    @default(0)
+  hits      Int      @default(0)
+  origin    String   @default("behaviour") @db.VarChar(20) // onboarding | behaviour | confirmed | imported
+  lastSeen  DateTime @map("last_seen")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([studentId, kind, key])
+  @@index([studentId, weight])
+  @@index([kind, key])
+  @@map("interest_nodes")
+  @@schema("discover_db")
+}
+
+// Edges are SIGNED. `weight` is a magnitude — how much evidence accumulated in
+// that direction — and `sign` says which direction it points. They are separate
+// columns because a student can genuinely both engage with and dismiss the same
+// pair over time, and collapsing that into one number loses the disagreement the
+// signed model exists to read.
+//
+// `sign` is part of the unique key deliberately: with the old key a positive and
+// a negative observation of the same pair fought over one row and the last writer
+// won. Two signs are two different objects, so they are two rows.
+model InterestEdge {
+  id           String   @id @default(uuid()) @db.Uuid
+  studentId    String   @map("student_id") @db.Uuid
+  fromKind     String   @map("from_kind") @db.VarChar(16)
+  fromKey      String   @map("from_key") @db.VarChar(90)
+  toKind       String   @map("to_kind") @db.VarChar(16)
+  toKey        String   @map("to_key") @db.VarChar(90)
+  weight       Float    @default(0)
+  // +1 engaged / -1 dismissed. Derived deterministically from signalWeight's
+  // sign in interest/store.js — never model-chosen.
+  sign         Int      @default(1)
+  // Derived from (fromKind, toKind); the model never names a relationship.
+  relationship String   @default("TOPIC_CO_OCCURS") @db.VarChar(24)
+  source       String   @default("co_occurrence") @db.VarChar(24)
+  confidence   Float    @default(0.45)
+  evidenceRef  String?  @map("evidence_ref") @db.VarChar(240)
+  modelVersion String?  @map("model_version") @db.VarChar(80)
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // TWO different names, and they are not interchangeable:
+  //   name: the Prisma CLIENT compound-key argument used in `where: { ... }`.
+  //         Without it the client derives one from the field list.
+  //   map:  the DATABASE constraint name emitted by the migration. The generated
+  //         one would be 68 chars and Prisma truncates at 63, which is why the
+  //         DB name is pinned here rather than left to the generator.
+  @@unique([studentId, fromKind, fromKey, toKind, toKey, sign], name: "interest_edges_student_pair_sign_key", map: "interest_edges_student_pair_sign_key")
+  @@index([studentId, weight])
+  @@map("interest_edges")
+  @@schema("discover_db")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM proposals land here and NOWHERE else.
+//
+// This table is the whole MASTERCONTEXT §7 argument for the service: the model
+// is allowed to *notice* that a student has been reading about rock climbing,
+// but nothing in this table reaches ranking, the tutor prompt, or the hunt.
+// A row becomes an InterestNode only through a deterministic gate in
+// interest/promote.js — a human confirmation, or a plain integer threshold of
+// independent evidence. Never widen this: an accepted candidate must always be
+// traceable to a human decision or to a counter, not to a model's judgement.
+// ─────────────────────────────────────────────────────────────────────────────
+model InterestCandidate {
+  id            String    @id @default(uuid()) @db.Uuid
+  studentId     String    @map("student_id") @db.Uuid
+  key           String    @db.VarChar(90)
+  label         String    @db.VarChar(120)
+  cluster       String    @default("other") @db.VarChar(40)
+  evidenceCount Int       @default(1) @map("evidence_count")
+  evidence      Json      @default("[]")
+  status        String    @default("pending") @db.VarChar(20) // pending | accepted | rejected | expired
+  proposedAt    DateTime  @default(now()) @map("proposed_at")
+  decidedAt     DateTime? @map("decided_at")
+
+  @@unique([studentId, key])
+  @@index([studentId, status, proposedAt])
+  @@map("interest_candidates")
+  @@schema("discover_db")
+}
+
+model DiscoverArticle {
+  id            String   @id @default(uuid()) @db.Uuid
+  sourceKey     String   @map("source_key") @db.VarChar(80)
+  sourceName    String   @map("source_name") @db.VarChar(120)
+  category      String   @db.VarChar(60)
+  title         String   @db.VarChar(240)
+  summary       String   @db.Text
+  url           String   @unique @db.VarChar(1200)
+  imageUrl      String?  @map("image_url") @db.VarChar(1600)
+  publishedAt   DateTime @map("published_at")
+  expiresAt     DateTime @map("expires_at")
+  safetyStatus  String   @default("approved") @map("safety_status") @db.VarChar(30)
+  origin        String   @default("rss") @db.VarChar(20) // rss | hunt
+  huntTopicKey  String?  @map("hunt_topic_key") @db.VarChar(90)
+  // Facets are extracted ONCE, at write time. Ranking runs on every feed
+  // request and must never re-parse article text.
+  topics        Json?
+  entities      Json?
+  // Gen-Z tone rewrite (hunted articles only — RSS never sets these; a
+  // permanently-null rawTitle/rawSummary IS the record that an article was
+  // never touched by the rewrite pass, not a missing backfill). `title`/
+  // `summary` above hold the rewritten text once toneRewritten is true;
+  // rawTitle/rawSummary always hold the original.
+  rawTitle      String?  @map("raw_title") @db.VarChar(240)
+  rawSummary    String?  @map("raw_summary") @db.Text
+  toneRewritten Boolean  @default(false) @map("tone_rewritten")
+  toneModel     String?  @map("tone_model") @db.VarChar(80)
+  toneProvider  String?  @map("tone_provider") @db.VarChar(24)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  signals NewsSignal[]
+
+  @@index([safetyStatus, publishedAt])
+  @@index([category, publishedAt])
+  @@index([huntTopicKey, publishedAt])
+  @@map("discover_articles")
+  @@schema("discover_db")
+}
+
+/// Unlike the ai_db predecessor this carries a real FK, so purging an expired
+/// article can no longer silently orphan the signals that referenced it.
+model NewsSignal {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  articleId String   @map("article_id") @db.Uuid
+  sessionId String?  @map("session_id") @db.VarChar(64)
+  kind      String   @db.VarChar(20)
+  dwellMs   Int      @default(0) @map("dwell_ms")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  article DiscoverArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@index([studentId, articleId])
+  @@map("news_signals")
+  @@schema("discover_db")
+}
+
+model StudentInterestProfile {
+  studentId             String    @id @map("student_id") @db.Uuid
+  summary               Json
+  promptContext         String    @map("prompt_context") @db.Text
+  signalCount           Int       @default(0) @map("signal_count")
+  importedLegacyGraphAt DateTime? @map("imported_legacy_graph_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  @@map("student_interest_profiles")
+  @@schema("discover_db")
+}
+
+// Student-exclusive preference controls and automatic tutor-text observations.
+// This is an engagement store only: no quiz/practice identifier or academic
+// outcome is accepted by its API, and no teacher/parent resolver exposes it.
+model StudentPreference {
+  id           String   @id @default(uuid()) @db.Uuid
+  studentId    String   @map("student_id") @db.Uuid
+  topicKey     String   @map("topic_key") @db.VarChar(90)
+  stance       String   @db.VarChar(16) // LIKE | DISLIKE
+  source       String   @db.VarChar(24) // explicit | discover | tutor_text
+  confidence   Float    @default(1)
+  evidenceRef  String?  @map("evidence_ref") @db.VarChar(240)
+  modelVersion String?  @map("model_version") @db.VarChar(80)
+  muted        Boolean  @default(false)
+  lastSeen     DateTime @default(now()) @map("last_seen")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@unique([studentId, topicKey], name: "studentTopicPreference")
+  @@index([studentId, muted, updatedAt])
+  @@map("student_preferences")
+  @@schema("discover_db")
+}
+
+model PreferenceObservation {
+  id           String   @id @default(uuid()) @db.Uuid
+  eventId      String   @map("event_id") @db.VarChar(96)
+  studentId    String   @map("student_id") @db.Uuid
+  topicKey     String   @map("topic_key") @db.VarChar(90)
+  stance       String   @db.VarChar(16)
+  source       String   @db.VarChar(24)
+  confidence   Float
+  evidenceRef  String?  @map("evidence_ref") @db.VarChar(240)
+  modelVersion String?  @map("model_version") @db.VarChar(80)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([studentId, eventId, topicKey], name: "studentEventTopicObservation")
+  @@index([studentId, createdAt])
+  @@index([studentId, topicKey, createdAt])
+  @@map("preference_observations")
+  @@schema("discover_db")
+}
+
+model PreferenceRefreshRun {
+  id               String    @id @default(uuid()) @db.Uuid
+  runKey           String    @unique @map("run_key") @db.VarChar(80)
+  status           String    @default("running") @db.VarChar(20)
+  profileCount     Int       @default(0) @map("profile_count")
+  modelVersion     String?   @map("model_version") @db.VarChar(80)
+  trainingStatus   String    @default("not_started") @map("training_status") @db.VarChar(24)
+  trainingPromoted Boolean   @default(false) @map("training_promoted")
+  trainingReason   String?   @map("training_reason") @db.VarChar(80)
+  leaseExpiresAt   DateTime? @map("lease_expires_at")
+  error            String?   @db.Text
+  startedAt        DateTime  @default(now()) @map("started_at")
+  completedAt      DateTime? @map("completed_at")
+
+  @@index([status, startedAt])
+  @@map("preference_refresh_runs")
+  @@schema("discover_db")
+}
+
+model PreferenceDecisionRecord {
+  id              String   @id @default(uuid()) @db.Uuid
+  studentId       String   @map("student_id") @db.Uuid
+  topicKey        String   @map("topic_key") @db.VarChar(90)
+  affinity        Float
+  source          String   @db.VarChar(24)
+  overrideApplied Boolean  @default(false) @map("override_applied")
+  ruleVersion     String   @map("rule_version") @db.VarChar(80)
+  modelVersion    String?  @map("model_version") @db.VarChar(80)
+  evidenceRefs    Json     @default("[]") @map("evidence_refs")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@index([studentId, topicKey, createdAt])
+  @@map("preference_decision_records")
+  @@schema("discover_db")
+}
+
+/// Lease row. The predecessor refreshed news from an in-process setInterval,
+/// so with replicas > 1 every pod hit the feeds and raced the same upserts.
+/// Workers here claim a row with updateMany({where:{id, status:'queued'}}) —
+/// the same claim pattern quiz/practice/visuals already use — so only one pod
+/// runs a given hunt regardless of replica count.
+model HuntRun {
+  id          String    @id @default(uuid()) @db.Uuid
+  topicKey    String    @map("topic_key") @db.VarChar(90)
+  topicLabel  String    @map("topic_label") @db.VarChar(120)
+  status      String    @default("queued") @db.VarChar(20) // queued | running | done | failed
+  queries     Json?
+  provider    String?   @db.VarChar(24)
+  resultCount Int       @default(0) @map("result_count")
+  storedCount Int       @default(0) @map("stored_count")
+  error       String?   @db.Text
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([status, createdAt])
+  @@index([topicKey, createdAt])
+  @@map("hunt_runs")
+  @@schema("discover_db")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Academic Cards — "hide the intervention, not the intelligence."
+//
+// A card looks like an ordinary Discover feed item, but its grounding is a
+// weak area pulled from quiz/practice's own student-learning-context routes.
+// `targetWeakArea` and `sourceService` are the targeting the student never
+// sees verbatim — the rendered `spec` never names the weak area directly.
+// Same generation shape as services/practice: shape-only JSON Schema +
+// hand-written validate() + services/discover/structured-llm.js (copy #6,
+// unmodified) + reject-not-repair citations + render-on-read.
+// ─────────────────────────────────────────────────────────────────────────────
+model AcademicCard {
+  id                 String             @id @default(uuid()) @db.Uuid
+  studentId          String             @map("student_id") @db.Uuid
+  schoolId           String             @map("school_id") @db.Uuid
+  status             AcademicCardStatus @default(queued)
+  kind               AcademicCardKind   @default(mcq_card)
+  chapterKey         String             @map("chapter_key") @db.VarChar(80)
+  contentFingerprint String             @map("content_fingerprint") @db.VarChar(80)
+  spec               Json?
+  provenance         Json?
+  targetWeakArea     String             @map("target_weak_area") @db.VarChar(160)
+  // The RAG documents this card was grounded in. Carried back out through
+  // /internal/card-attempt-outcomes so a missed recall lands on the same
+  // chapter the weak area came from, exactly as a missed quiz question does.
+  documentIds        String[]           @map("document_ids")
+  sourceService      String             @map("source_service") @db.VarChar(16) // quiz | practice
+  failureReason      String?            @map("failure_reason") @db.Text
+  model              String?            @db.VarChar(80)
+  provider           String?            @db.VarChar(24)
+  // viewedAt: set once by POST /cards/:cardId/viewed — a plain read-ack for a
+  // micro-article, which has no MCQ attempt to record instead.
+  // deliveredAt: set when the feed's interleave pass actually hands this card
+  // to a student, so a done-but-not-yet-shown card doesn't look "used" before
+  // it ever reached anyone (queue accounting for the pre-warm check).
+  viewedAt           DateTime?          @map("viewed_at")
+  deliveredAt        DateTime?          @map("delivered_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  attempts AcademicCardAttempt[]
+
+  @@index([studentId, createdAt])
+  @@index([studentId, chapterKey, contentFingerprint, kind], map: "academic_cards_cache_idx")
+  @@map("academic_cards")
+  @@schema("discover_db")
+}
+
+enum AcademicCardStatus {
+  queued
+  processing
+  done
+  failed
+
+  @@schema("discover_db")
+}
+
+// mcq_card: the original weak-area-grounded multiple-choice shape.
+// micro_article: a short curiosity-framed paraphrase ending in a soft CTA
+// toward Tutor or Practice — no question, no correctAnswer, no attempt.
+enum AcademicCardKind {
+  mcq_card
+  micro_article
+
+  @@schema("discover_db")
+}
+
+model AcademicCardAttempt {
+  id             String    @id @default(uuid()) @db.Uuid
+  cardId         String    @map("card_id") @db.Uuid
+  studentId      String    @map("student_id") @db.Uuid
+  schoolId       String    @map("school_id") @db.Uuid
+  selectedAnswer String    @map("selected_answer") @db.Text
+  correct        Boolean
+  answeredAt     DateTime? @map("answered_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  card AcademicCard @relation(fields: [cardId], references: [id])
+
+  @@index([studentId, createdAt])
+  @@index([cardId, studentId])
+  @@map("academic_card_attempts")
+  @@schema("discover_db")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Video hunt — same lease-row shape as HuntRun, kept as its own table rather
+// than a contentType column on HuntRun so the claim idiom and cooldown lookback
+// stay scoped to video without a filter creeping into the article hunt's hot
+// path, and so cadence (far less frequent — YouTube search.list quota is much
+// tighter than the news search provider's) can be tuned independently.
+// ─────────────────────────────────────────────────────────────────────────────
+model VideoHuntRun {
+  id               String    @id @default(uuid()) @db.Uuid
+  topicKey         String    @map("topic_key") @db.VarChar(90)
+  topicLabel       String    @map("topic_label") @db.VarChar(120)
+  status           String    @default("queued") @db.VarChar(20) // queued | running | done | failed
+  queries          Json?
+  provider         String?   @db.VarChar(24)
+  resultCount      Int       @default(0) @map("result_count")
+  storedCount      Int       @default(0) @map("stored_count")
+  // How many new channels this run spent channels.list/playlistItems.list
+  // quota enriching — the quota-heaviest step, kept visible on the row rather
+  // than buried in `error`.
+  channelsEnriched Int       @default(0) @map("channels_enriched")
+  error            String?   @db.Text
+  startedAt        DateTime? @map("started_at")
+  finishedAt       DateTime? @map("finished_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([status, createdAt])
+  @@index([topicKey, createdAt])
+  @@map("video_hunt_runs")
+  @@schema("discover_db")
+}
+
+model DiscoverVideo {
+  id                 String   @id @default(uuid()) @db.Uuid
+  videoId            String   @unique @map("video_id") @db.VarChar(32)
+  channelId          String   @map("channel_id") @db.VarChar(32)
+  channelName        String   @map("channel_name") @db.VarChar(160)
+  category           String   @db.VarChar(60)
+  title              String   @db.VarChar(240)
+  summary            String   @db.Text
+  url                String   @unique @db.VarChar(300)
+  thumbnailUrl       String?  @map("thumbnail_url") @db.VarChar(1600)
+  publishedAt        DateTime @map("published_at")
+  expiresAt          DateTime @map("expires_at")
+  durationSeconds    Int      @default(0) @map("duration_seconds")
+  viewCount          Int      @default(0) @map("view_count")
+  safetyStatus       String   @default("approved") @map("safety_status") @db.VarChar(30)
+  origin             String   @default("hunt") @db.VarChar(20) // hunt only — no RSS-equivalent floor for video
+  huntTopicKey       String?  @map("hunt_topic_key") @db.VarChar(90)
+  // Facets are extracted ONCE, at write time, same rationale as
+  // DiscoverArticle.topics/entities — ranking must never re-parse at read time.
+  topics             Json?
+  entities           Json?
+  // Scoring inputs, cached at store time. This is the channel's TrustedChannel
+  // state at the moment this video was hunted, not a live join — rescoring on
+  // evidence growth is a hunt-time concern, not a feed-time one.
+  channelTrustStatus String   @default("pending") @map("channel_trust_status") @db.VarChar(20) // trusted | pending | blocked
+  channelNarrowness  Float?   @map("channel_narrowness")
+  nicheScore         Float    @default(0) @map("niche_score")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  signals VideoSignal[]
+
+  @@index([safetyStatus, publishedAt])
+  @@index([huntTopicKey, publishedAt])
+  @@map("discover_videos")
+  @@schema("discover_db")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Channel trust. Reuses interest/promote.js's candidateDecision()/mergeEvidence()
+// directly (imported, not reimplemented) — both functions only ever touch
+// generic status/evidenceCount/evidence fields, so a channel earning trust
+// through repeated distinct-session engagement is the SAME promotion gate an
+// interest topic uses to earn a graph node. subscriberCount/videoCount are
+// cached for debugging only — never a scoring input, deliberately: a
+// size-based credibility bonus would quietly re-introduce the exact
+// mainstream-over-niche bias this table exists to correct for.
+// ─────────────────────────────────────────────────────────────────────────────
+model TrustedChannel {
+  id               String    @id @default(uuid()) @db.Uuid
+  channelId        String    @unique @map("channel_id") @db.VarChar(32)
+  channelName      String    @map("channel_name") @db.VarChar(160)
+  status           String    @default("pending") @db.VarChar(20) // pending | trusted | blocked
+  subscriberCount  Int?      @map("subscriber_count")
+  videoCount       Int?      @map("video_count")
+  // The niche signal: share of a sampled recent-uploads set whose dominant
+  // topic matches the channel's own single most common topic cluster, via
+  // interest/graph.js's extractTopics — no LLM. High for a single-person
+  // channel that only ever posts one topic; low for a newsroom whose uploads
+  // span every desk.
+  topicNarrowness  Float?    @map("topic_narrowness")
+  dominantTopicKey String?   @map("dominant_topic_key") @db.VarChar(90)
+  lastEnrichedAt   DateTime? @map("last_enriched_at")
+  // Same evidence shape interest/promote.js already expects: [{sessionId, urls}].
+  // "urls" holds video URLs the evidence came from, not article URLs — kept
+  // as the same field name so mergeEvidence() needs no branching.
+  evidenceCount    Int       @default(0) @map("evidence_count")
+  evidence         Json      @default("[]")
+  // Distinguishes a hand-seeded launch channel (env-var import, bypasses the
+  // evidence gate) from one that earned trust through evidence.
+  seedSource       String?   @map("seed_source") @db.VarChar(20) // curated | manual | null (evidence-grown)
+  promotedAt       DateTime? @map("promoted_at")
+  decidedAt        DateTime? @map("decided_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@map("trusted_channels")
+  @@schema("discover_db")
+}
+
+/// Parallel table to NewsSignal, not a widened FK on it — NewsSignal.articleId
+/// is a hard, non-nullable cascade FK, and making it optionally point at
+/// either DiscoverArticle or DiscoverVideo would need an unenforceable-in-Prisma
+/// "exactly one of articleId/videoId" invariant. Same shape otherwise.
+model VideoSignal {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  videoId   String   @map("video_id") @db.Uuid
+  sessionId String?  @map("session_id") @db.VarChar(64)
+  kind      String   @db.VarChar(20)
+  dwellMs   Int      @default(0) @map("dwell_ms")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  video DiscoverVideo @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  @@index([studentId, createdAt])
+  @@index([studentId, videoId])
+  @@map("video_signals")
+  @@schema("discover_db")
+}
+
+// Privacy-control tombstones contain no observations, stance or answer text.
+// They prevent delayed requests and daily jobs recreating deleted interests.
+model PreferenceControl {
+  studentId String   @map("student_id") @db.Uuid
+  scopeHash String   @map("scope_hash") @db.VarChar(64)
+  blocked   Boolean  @default(true)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@id([studentId, scopeHash], name: "studentPreferenceControl")
+  @@map("preference_controls")
+  @@schema("discover_db")
+}
+
+model PreferenceReceipt {
+  digest    String   @id @db.VarChar(64)
+  studentId String   @map("student_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([studentId])
+  @@map("preference_receipts")
+  @@schema("discover_db")
+}

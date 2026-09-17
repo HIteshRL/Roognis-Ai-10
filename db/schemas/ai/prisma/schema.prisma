@@ -1,0 +1,396 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["ai_db"]
+}
+
+model ChatSession {
+  documentId String? @map("document_id") @db.Uuid
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  schoolId  String   @map("school_id") @db.Uuid
+  subject   String   @db.VarChar(80)
+  board     String?  @db.VarChar(40)
+  curriculum String? @db.VarChar(80)
+  grade     Int?
+  chapterNumber Int? @map("chapter_number")
+  chapterName String? @map("chapter_name") @db.VarChar(160)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  messages Message[]
+
+  @@index([studentId, createdAt])
+  @@index([schoolId, subject])
+  @@index([schoolId, subject, grade, chapterNumber])
+  @@map("chat_sessions")
+  @@schema("ai_db")
+}
+
+model Message {
+  id                String      @id @default(uuid()) @db.Uuid
+  sessionId         String      @map("session_id") @db.Uuid
+  role              MessageRole
+  content           String      @db.Text
+  sourcePage        Int?        @map("source_page")
+  requestId         String?     @map("request_id") @db.Uuid
+  inferenceMetadata Json?       @map("inference_metadata")
+  createdAt         DateTime    @default(now()) @map("created_at")
+
+  session  ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  feedback Feedback[]
+
+  @@index([sessionId, createdAt])
+  @@unique([sessionId, requestId])
+  @@map("messages")
+  @@schema("ai_db")
+}
+
+model ImageJob {
+  id            String         @id @default(uuid()) @db.Uuid
+  studentId     String         @map("student_id") @db.Uuid
+  schoolId      String         @map("school_id") @db.Uuid
+  prompt        String         @db.Text
+  status        ImageJobStatus @default(queued)
+  imageUrl      String?        @map("image_url") @db.VarChar(500)
+  failureReason String?        @map("failure_reason") @db.Text
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  @@index([studentId, createdAt])
+  @@index([status, createdAt])
+  @@map("image_jobs")
+  @@schema("ai_db")
+}
+
+model Feedback {
+  id        String   @id @default(uuid()) @db.Uuid
+  messageId String   @map("message_id") @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  schoolId  String   @map("school_id") @db.Uuid
+  rating    Int
+  comment   String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+  @@index([studentId, createdAt])
+  @@map("feedback")
+  @@schema("ai_db")
+}
+
+model StudentOnboarding {
+  id             String           @id @default(uuid()) @db.Uuid
+  studentId      String           @unique @map("student_id") @db.Uuid
+  schoolId       String           @map("school_id") @db.Uuid
+  status         OnboardingStatus @default(in_progress)
+  questionSource String           @default("fallback") @map("question_source") @db.VarChar(40)
+  questions      Json
+  answers        Json             @default("{}")
+  startedAt      DateTime         @default(now()) @map("started_at")
+  completedAt    DateTime?        @map("completed_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  @@index([schoolId, status])
+  @@map("student_onboarding")
+  @@schema("ai_db")
+}
+
+model StudentLearningProfile {
+  id            String   @id @default(uuid()) @db.Uuid
+  studentId     String   @unique @map("student_id") @db.Uuid
+  schoolId      String   @map("school_id") @db.Uuid
+  profile       Json
+  promptContext String   @map("prompt_context") @db.Text
+  source        String   @default("onboarding") @db.VarChar(40)
+  version       Int      @default(1)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([schoolId])
+  @@map("student_learning_profiles")
+  @@schema("ai_db")
+}
+
+model StudentNewsArticle {
+  id           String   @id @default(uuid()) @db.Uuid
+  sourceKey    String   @map("source_key") @db.VarChar(80)
+  sourceName   String   @map("source_name") @db.VarChar(120)
+  category     String   @db.VarChar(60)
+  title        String   @db.VarChar(240)
+  summary      String   @db.Text
+  url          String   @unique @db.VarChar(1200)
+  imageUrl     String?  @map("image_url") @db.VarChar(1600)
+  publishedAt  DateTime @map("published_at")
+  expiresAt    DateTime @map("expires_at")
+  safetyStatus String   @default("approved") @map("safety_status") @db.VarChar(30)
+  // Extracted once at refresh so ranking never re-parses on the read path.
+  topics       Json?
+  entities     Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@index([safetyStatus, publishedAt])
+  @@index([category, publishedAt])
+  @@map("student_news_articles")
+  @@schema("ai_db")
+}
+
+// ── Interest Graph ───────────────────────────────────────────────────────────
+// A per-student knowledge graph built from what they actually read. Nodes are
+// genres, topics and named entities; weights decay so the graph reflects
+// present interest. Read by the tutor to choose examples — never to change
+// academic content.
+
+model StudentInterestNode {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  kind      String   @db.VarChar(16) // genre | topic | entity
+  key       String   @db.VarChar(90)
+  weight    Float    @default(0)
+  hits      Int      @default(0)
+  lastSeen  DateTime @map("last_seen")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([studentId, kind, key])
+  @@index([studentId, weight])
+  @@map("student_interest_nodes")
+  @@schema("ai_db")
+}
+
+model StudentInterestEdge {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  fromKind  String   @map("from_kind") @db.VarChar(16)
+  fromKey   String   @map("from_key") @db.VarChar(90)
+  toKind    String   @map("to_kind") @db.VarChar(16)
+  toKey     String   @map("to_key") @db.VarChar(90)
+  weight    Float    @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([studentId, fromKind, fromKey, toKind, toKey])
+  @@index([studentId, weight])
+  @@map("student_interest_edges")
+  @@schema("ai_db")
+}
+
+model StudentNewsSignal {
+  id        String   @id @default(uuid()) @db.Uuid
+  studentId String   @map("student_id") @db.Uuid
+  articleId String   @map("article_id") @db.Uuid
+  kind      String   @db.VarChar(20) // impression | open | dwell | share | skip
+  dwellMs   Int      @default(0) @map("dwell_ms")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([studentId, createdAt])
+  @@index([studentId, articleId])
+  @@map("student_news_signals")
+  @@schema("ai_db")
+}
+
+model StudentInterestProfile {
+  studentId     String   @id @map("student_id") @db.Uuid
+  summary       Json
+  promptContext String   @map("prompt_context") @db.Text
+  signalCount   Int      @default(0) @map("signal_count")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("student_interest_profiles")
+  @@schema("ai_db")
+}
+
+// ── Safety review queue ──────────────────────────────────────────────────────
+// MASTERCONTEXT §12: a possible well-being concern becomes a human-review flag,
+// never an automated inference and never an automated parent notification.
+// Before this table a self-harm block produced a canned redirect back to
+// schoolwork and an anonymous increment in a weekly counter — no teacher could
+// learn that a specific child had been refused, let alone which one.
+//
+// What is deliberately NOT stored: the child's message. Input blocks return
+// before the message is persisted, and keeping the text of a minor's
+// disclosure would be a data-minimisation problem under the DPDP Act. The row
+// records that a named safety rule fired for a named student at a time — which
+// is what a human needs in order to go and check on them. It stores no
+// inferred state, no score and no clinical label.
+model SafetyReviewFlag {
+  id             String    @id @default(uuid()) @db.Uuid
+  studentId      String    @map("student_id") @db.Uuid
+  schoolId       String    @map("school_id") @db.Uuid
+  // The safety rule that matched, e.g. self_harm | grooming.
+  category       String    @db.VarChar(40)
+  // chat_input | chat_output | image_prompt | visual_prompt
+  surface        String    @db.VarChar(24)
+  sessionId      String?   @map("session_id") @db.Uuid
+  acknowledgedAt DateTime? @map("acknowledged_at")
+  acknowledgedBy String?   @map("acknowledged_by") @db.Uuid
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([schoolId, acknowledgedAt, createdAt])
+  @@index([studentId, createdAt])
+  @@map("safety_review_flags")
+  @@schema("ai_db")
+}
+
+// A generated educational visual — today a concept map, rendered as inert SVG.
+//
+// Stores the SPEC, not the rendered SVG. The spec is small, diffable, and
+// re-rendered on every read, so a renderer fix applies retroactively to every
+// artifact already generated instead of leaving a tail of stale markup. Nothing
+// is written to the file_storage volume; unlike ImageJob there are no bytes.
+//
+// Scoped to the requesting student on purpose. There is no approval gate on
+// these, which is consistent with tutor chat text — it can be flatly wrong and
+// ships ungated, and a visual writes no learner state at all. What makes that
+// safe is that nothing fans out: the cache below is a same-student dedupe, so a
+// visual is never silently served to a classmate who did not ask for it. If
+// school-wide sharing is ever added, it needs a human review gate in the same
+// change — sharing and review are one decision, not two.
+model VisualArtifact {
+  id                 String               @id @default(uuid()) @db.Uuid
+  studentId          String               @map("student_id") @db.Uuid
+  schoolId           String               @map("school_id") @db.Uuid
+  kind               String               @db.VarChar(24)
+  status             VisualArtifactStatus @default(queued)
+  // sha256 of the RAG chapter identity 9-tuple, and the chapter's own content
+  // fingerprint. Together they invalidate the cache when the chapter is re-ingested.
+  chapterKey         String               @map("chapter_key") @db.VarChar(80)
+  contentFingerprint String               @map("content_fingerprint") @db.VarChar(80)
+  // Derived from the resolved grounding, never from model output — an LLM
+  // normalising a prompt into a slug would make the cache key non-deterministic.
+  conceptSlug        String               @map("concept_slug") @db.VarChar(120)
+  prompt             String               @db.Text
+  spec               Json?
+  provenance         Json?
+  failureReason      String?              @map("failure_reason") @db.Text
+  model              String?              @db.VarChar(80)
+  provider           String?              @db.VarChar(24)
+  createdAt          DateTime             @default(now()) @map("created_at")
+  updatedAt          DateTime             @updatedAt @map("updated_at")
+
+  @@index([studentId, createdAt])
+  // Named explicitly: the derived name would be 81 characters, past Postgres's
+  // 63-byte identifier limit, and letting Prisma silently truncate it means the
+  // hand-written migration and `db push` could disagree on the index name.
+  @@index([studentId, kind, chapterKey, contentFingerprint, conceptSlug], map: "visual_artifacts_cache_idx")
+  @@index([status, createdAt])
+  @@map("visual_artifacts")
+  @@schema("ai_db")
+}
+
+// Chapter-aware decorative visual generated for a single learner. The record is
+// intentionally keyed by a server-derived digest and does not store learner
+// answers, names, chat text, scores, or behavioural telemetry.
+model StudyVisual {
+  id                 String   @id @default(uuid()) @db.Uuid
+  studentId          String   @map("student_id") @db.Uuid
+  schoolId           String   @map("school_id") @db.Uuid
+  documentId         String   @map("document_id") @db.Uuid
+  learningVersionId  String   @map("learning_version_id") @db.Uuid
+  subject            String   @db.VarChar(80)
+  chapterName        String   @map("chapter_name") @db.VarChar(160)
+  contentFingerprint String   @map("content_fingerprint") @db.VarChar(80)
+  visualKey          String   @unique @map("visual_key") @db.VarChar(64)
+  visualState        String   @map("visual_state") @db.VarChar(16)
+  theme              String   @db.VarChar(12)
+  prompt             String   @db.Text
+  seed               Int
+  status             String   @default("queued") @db.VarChar(16)
+  imageUrl           String?  @map("image_url") @db.VarChar(500)
+  failureReason      String?  @map("failure_reason") @db.Text
+  provider           String?  @db.VarChar(32)
+  model              String?  @db.VarChar(120)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@index([studentId, updatedAt])
+  @@index([studentId, documentId, theme, updatedAt])
+  @@index([status, createdAt])
+  @@map("study_visuals")
+  @@schema("ai_db")
+}
+
+// One protected, minimal resume pointer per learner. This is updated only when
+// a student opens a teacher-published chapter; it is never inferred from dwell
+// time, clicks, assessment performance, or any other behavioural signal.
+model StudyResumeContext {
+  studentId          String   @id @map("student_id") @db.Uuid
+  schoolId           String   @map("school_id") @db.Uuid
+  documentId         String   @map("document_id") @db.Uuid
+  learningVersionId  String   @map("learning_version_id") @db.Uuid
+  subject            String   @db.VarChar(80)
+  chapterName        String   @map("chapter_name") @db.VarChar(160)
+  contentFingerprint String   @map("content_fingerprint") @db.VarChar(80)
+  lastActiveAt       DateTime @default(now()) @map("last_active_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@index([schoolId, lastActiveAt])
+  @@map("study_resume_contexts")
+  @@schema("ai_db")
+}
+
+enum MessageRole {
+  user
+  assistant
+
+  @@schema("ai_db")
+}
+
+enum VisualArtifactStatus {
+  queued
+  processing
+  done
+  failed
+
+  @@schema("ai_db")
+}
+
+enum ImageJobStatus {
+  queued
+  processing
+  done
+  failed
+
+  @@schema("ai_db")
+}
+
+enum OnboardingStatus {
+  in_progress
+  completed
+
+  @@schema("ai_db")
+}
+model PreferenceDelivery {
+  messageId String @id @map("message_id") @db.Uuid
+  studentId String @map("student_id") @db.Uuid
+  attempts Int @default(0)
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  deliveredAt DateTime? @map("delivered_at")
+  lastError String? @map("last_error") @db.VarChar(240)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([deliveredAt, nextAttemptAt])
+  @@map("preference_delivery")
+  @@schema("ai_db")
+}
+
+
+model GenerationTask {
+  id String @id @db.Uuid
+  payload Json
+  status String @default("queued")
+  attempts Int @default(0)
+  availableAt DateTime @default(now()) @map("available_at")
+  leasedUntil DateTime? @map("leased_until")
+  leaseToken String? @map("lease_token")
+  lastError String? @map("last_error")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  @@index([status, availableAt])
+  @@map("generation_tasks")
+  @@schema("ai_db")
+}

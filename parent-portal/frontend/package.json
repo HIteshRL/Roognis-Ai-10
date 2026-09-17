@@ -1,0 +1,13 @@
+{
+  "name": "roognis-frontend",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Roognis AI — wired frontend MVP",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test-server.js"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.3.289"
+  }
+}

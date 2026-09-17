@@ -1,0 +1,22 @@
+# Local integration-build overlay only. Never use this file for an approved
+# release: platform.compose.yaml requires immutable image digests instead.
+services:
+  auth: { build: ../apis/services/auth }
+  ai: { build: ../apis/services/ai }
+  analytics: { build: ../apis/services/analytics }
+  quiz: { build: ../apis/services/quiz }
+  practice: { build: ../apis/services/practice }
+  discover: { build: ../apis/services/discover }
+  reporting: { build: ../apis/services/reporting }
+  rag: { build: ../data-processing-backend/services/rag }
+  rag-worker: { build: ../data-processing-backend/services/rag }
+  lms: { build: ../lms-services-backend/services/lms }
+  kg: { build: ../intelligence-decisioning/services/kg }
+  knowledge-gnn: { build: ../intelligence-decisioning/services/gnn }
+  preference-gnn: { build: ../intelligence-decisioning/services/gnn }
+  preference-gnn-trainer: { build: ../intelligence-decisioning/services/gnn }
+  decisions: { build: ../intelligence-decisioning/services/decisions }
+  privacy: { build: ../intelligence-decisioning/services/privacy }
+  parent-portal: { build: ../parent-portal/web }
+  student-portal: { build: ../student-portal/web }
+  teacher-portal: { build: ../teacher-portal/web }

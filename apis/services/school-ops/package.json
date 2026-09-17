@@ -1,0 +1,32 @@
+{
+  "name": "roognis-school-ops",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Roognis school operations control plane",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "pretest": "prisma generate --schema=prisma/schema.prisma",
+    "test": "node --test test/*.test.js",
+    "db:push": "npx prisma db push --schema=prisma/schema.prisma",
+    "db:migrate": "npx prisma migrate deploy --schema=prisma/schema.prisma",
+    "db:generate": "npx prisma generate --schema=prisma/schema.prisma",
+    "db:validate": "npx prisma validate --schema=prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0",
+    "cookie-parser": "^1.4.6",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "prisma": "^5.14.0"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

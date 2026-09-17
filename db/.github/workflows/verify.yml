@@ -1,0 +1,21 @@
+name: Verify Database Reference
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  reference-integrity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m compileall -q schemas/lms
+      - run: test -f schemas/lms/alembic/versions/0019_submission_is_late.py
+      - run: test -f schemas/lms/alembic/versions/0020_guardian_redeemable_code.py
+      - run: test -x scripts/verify-reference.sh
